@@ -3,7 +3,6 @@
 =#
 
 function _sum_vector(Bd, i, j, S)
-    acc = 0.0
     s1 = 0.0
     s2 = 0.0
     @turbo for k in 1:S
@@ -53,20 +52,15 @@ function assemble!(C::AbstractMatrix, K::OTCondensedBlock)
         for k in 1:S
             buffer[k] = θ[k + S * (i-1)] / D[k]
         end
-        for j in 1:i, k in 1:S
-            C[i, j] -= buffer[k] * θ[k + S*(j-1)]
+        for j in 1:i
+            acc = 0.0
+            @turbo for k in 1:S
+                acc += buffer[k] * θ[k + S*(j-1)]
+            end
+            C[i, j] -= acc
         end
-        # Add - Σ⁻¹ (I + A₂ Σ⁻¹ A₂')⁻¹ Σ⁻¹
-        # for k in 1:S
-        #     C[i, j] -= θ[k + S*(i-1)] * θ[k + S*(j-1)] / D[k]
-        # end
-        # acc = _sum_vector(Bd, i, j, S)
-        # C[i, j] -= γ * acc
     end
-        # acc = 0.0
-        # for k in 1:S, l in 1:S
-        #     acc += @inbounds Bd[k + S * (i-1)] * Bd[l + S * (j-1)]
-        # end
+
     @inbounds for i in 1:L, j in 1:i
         acc = _sum_vector(Bd, i, j, S)
         C[i, j] -= γ * acc

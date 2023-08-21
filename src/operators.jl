@@ -11,21 +11,42 @@ Base.size(A::RowOperator) = (A.L, A.S * A.L)
 LinearAlgebra.issymmetric(A::RowOperator) = false
 LinearAlgebra.adjoint(A::RowOperator{T}) where T = LinearAlgebra.Adjoint{T, RowOperator{T}}(A)
 
-function LinearAlgebra.mul!(y, A::RowOperator{T}, x) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::RowOperator{T}, x::AbstractVector{T}) where T
     S, L = A.S, A.L
     fill!(y, zero(T))
     for l in 1:L
-        for s in 1:S
-            @inbounds y[l] += x[s + S*(l-1)]
+        @inbounds for s in 1:S
+            y[l] += x[s + S*(l-1)]
         end
     end
 end
 
-function LinearAlgebra.mul!(y, A::Adjoint{T, RowOperator{T}}, x) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::RowOperator{T}, x::AbstractVector{T}, alpha::T, beta::T) where T
+    S, L = A.S, A.L
+    @inbounds for l in 1:L
+        y[l] *= beta
+    end
+    for l in 1:L
+        @inbounds for s in 1:S
+            y[l] += alpha * x[s + S*(l-1)]
+        end
+    end
+end
+
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, RowOperator{T}}, x::AbstractVector{T}) where T
     S, L = A.parent.S, A.parent.L
     for l in 1:L
-        for s in 1:S
-            @inbounds y[s + S*(l-1)] = x[l]
+        @turbo for s in 1:S
+            y[s + S*(l-1)] = x[l]
+        end
+    end
+end
+
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, RowOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T <: Number
+    S, L = A.parent.S, A.parent.L
+    for l in 1:L
+        @turbo for s in 1:S
+            y[s + S*(l-1)] = alpha * x[l] + beta * y[s + S*(l-1)]
         end
     end
 end
@@ -42,7 +63,7 @@ Base.size(A::ColumnOperator) = (A.S, A.S * A.L)
 LinearAlgebra.adjoint(A::ColumnOperator{T}) where T = LinearAlgebra.Adjoint{T, ColumnOperator{T}}(A)
 LinearAlgebra.issymmetric(A::ColumnOperator) = false
 
-function LinearAlgebra.mul!(y, A::ColumnOperator{T}, x) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::AbstractVector{T}) where T
     S, L = A.S, A.L
     fill!(y, zero(T))
     for l in 1:L
@@ -52,11 +73,32 @@ function LinearAlgebra.mul!(y, A::ColumnOperator{T}, x) where T
     end
 end
 
-function LinearAlgebra.mul!(y, A::Adjoint{T, ColumnOperator{T}}, x) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::AbstractVector{T}, alpha::T, beta::T) where T
+    S, L = A.S, A.L
+    @inbounds for s in 1:S
+        y[s] *= beta
+    end
+    for l in 1:L
+        @turbo for s in 1:S
+            y[s] += alpha * x[s + S*(l-1)]
+        end
+    end
+end
+
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}) where T
     S, L = A.parent.S, A.parent.L
     for l in 1:L
         @turbo for s in 1:S
             y[s + S*(l-1)] = x[s]
+        end
+    end
+end
+
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T
+    S, L = A.parent.S, A.parent.L
+    for l in 1:L
+        @turbo for s in 1:S
+            y[s + S*(l-1)] = alpha * x[s] + beta * y[s + S * (l-1)]
         end
     end
 end

@@ -12,15 +12,15 @@ end
 
 # C = alpha * A / B + beta * C
 function scaldiv!(C, A, B, alpha, beta, N)
-    @inbounds for i in 1:N
+    @turbo for i in 1:N
         C[i] = beta * C[i] + alpha * A[i] / B[i]
     end
 end
 
 function axdiv!(A, B)
     N = length(A)
-    for i in 1:N
-        @inbounds A[i] = A[i] / B[i]
+    @turbo for i in 1:N
+        A[i] = A[i] / B[i]
     end
 end
 
@@ -41,7 +41,7 @@ function build_projection_wasserstein_qp(data::OTData, delta)
 
     model = Model()
     @variable(model, 0.0 <= x[1:L*S])
-    @variable(model, p[1:L])
+    @variable(model, p[1:S])
     @constraint(model, dot(data.d, x) <= delta)
     @constraint(model, data.A1 * x == data.q)
     @constraint(model, data.A2 * x == p)

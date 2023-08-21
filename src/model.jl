@@ -46,13 +46,21 @@ function OTCompactModel(data::OTData, delta; eval_hessian=false)
         end
     end
 
+    # Initial variable
+    x0 = zeros(S * L)
+    # x0 .= 1e-4
+    for s in 1:S, l in 1:L
+        x0[s + S * (l-1)] = data.w[s] / L
+    end
+    y0 = fill(0.0, L+1)
+
     meta = NLPModels.NLPModelMeta(
         S * L,     #nvar
         ncon = L+1,
         nnzj = length(j_z),
         nnzh = length(h_z),
-        x0 = zeros(S * L),
-        y0 = zeros(L + 1),
+        x0 = x0,
+        y0 = y0,
         lvar = zeros(S * L),
         lcon = [-Inf; data.q],
         ucon = [delta; data.q],
@@ -68,25 +76,28 @@ function OTCompactModel(data::OTData, delta; eval_hessian=false)
 end
 
 function NLPModels.obj(ot::OTCompactModel, x::Vector{T}) where T
+    A2 = ColumnOperator{Float64}(ot.data.L, ot.data.S)
     residual = ot.res
     residual .= ot.data.w
-    mul!(residual, ot.data.A2, x, 1.0, -1.0)
+    mul!(residual, A2, x, 1.0, -1.0)
     return 0.5 * dot(residual, residual)
 end
 
 function NLPModels.cons!(ot::OTCompactModel, x::Vector{T}, c::Vector{T}) where T
+    A1 = RowOperator{Float64}(ot.data.L, ot.data.S)
     L = ot.data.L
     c[1] = dot(ot.data.d, x)
     ca1 = view(c, 2:L+1)
-    mul!(ca1, ot.data.A1, x)
+    mul!(ca1, A1, x)
     return c
 end
 
 function NLPModels.grad!(ot::OTCompactModel, x::Vector{T}, g::Vector{T}) where T
+    A2 = ColumnOperator{Float64}(ot.data.L, ot.data.S)
     residual = ot.res
     residual .= ot.data.w
-    mul!(residual, ot.data.A2, x, 1.0, -1.0)
-    mul!(g, ot.data.A2', residual)
+    mul!(residual, A2, x, 1.0, -1.0)
+    mul!(g, A2', residual)
     return g
 end
 

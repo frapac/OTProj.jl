@@ -44,7 +44,7 @@ function compute_distance_2(n, m, distance)
     return D
 end
 
-function OTData(src_folder, class, img1, img2, resolution; distance=2)
+function OTData(src_folder, class, img1, img2, resolution; distance=2, preprocess=1)
     img1_file = joinpath(src_folder, class, "data$(resolution)_$(img1).csv")
     img2_file = joinpath(src_folder, class, "data$(resolution)_$(img2).csv")
     # Import data
@@ -56,6 +56,11 @@ function OTData(src_folder, class, img1, img2, resolution; distance=2)
     # Generate problem
     S, L = length(w), length(q)
     D = compute_distance_2(resolution, resolution, distance)
+    if preprocess >= 1
+        rind = findall(q .> 1e-10)
+        q = q[rind]
+        D = D[:, rind]
+    end
     d = D[:] ./ median(D)
     return OTData(w, q, d)
 end

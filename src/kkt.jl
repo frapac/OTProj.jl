@@ -83,6 +83,7 @@ function MadNLP.jtprod!(
     x::AbstractVector,
 ) where {T, VI, VT, MT}
     S, L = kkt.data.S, kkt.data.L
+    A1 = RowOperator{Float64}(L, S)
 
     vd = x[1]
     y_x = view(y, 1:S*L)
@@ -91,7 +92,7 @@ function MadNLP.jtprod!(
     y[S*L+1] = -vd
 
     vA1 = view(x, 2:L+1)
-    mul!(y_x, kkt.data.A1', vA1, 1.0, 1.0)
+    mul!(y_x, A1', vA1, 1.0, 1.0)
     return y
 end
 
@@ -112,20 +113,8 @@ function MadNLP.build_kkt!(kkt::OTKKTSystem)
     b1 = kkt.b1
     # Assemble Schur-complement
     assemble!(kkt.aug_com, kkt.K)
-    # @inbounds for i in 1:L
-    #     fill!(z1, 0.0)
-    #     z1[1+(i-1)*S:i*S] .= 1.0   # A₁ᵀ e
-    #     ldiv!(z2, kkt.K, z1)       # K⁻¹ A₁ᵀ e
-    #     @inbounds for l in 1:L
-    #         kkt.aug_com[l, i] = 0.0
-    #         for s in 1:S
-    #             kkt.aug_com[l, i] += z2[s + S*(l-1)]
-    #         end
-    #     end
-    # end
     # Symmetrize
-    for i in 1:L, j in (i+1):L
-        # val = 0.5 * (kkt.aug_com[i, j] + kkt.aug_com[j, i])
+    @inbounds for i in 1:L, j in (i+1):L
         kkt.aug_com[i, j] = kkt.aug_com[j, i]
     end
     return
@@ -165,9 +154,6 @@ function MadNLP.solve_refine_wrapper!(
     Δyy .= w2
     ldiv!(z1, kkt.K, w1)
     mul!(Δyy, kkt.data.A1, z1, 1.0, -1.0)
-
-    # AKA = NormalBlockOperator(kkt.K)
-    # res, stats = cg(AKA, Δyy; verbose=1, atol=1e-12, rtol=1e-12)
 
     solver.cnt.linear_solver_time += @elapsed begin
         status = MadNLP.solve!(solver.linear_solver, Δyy)
