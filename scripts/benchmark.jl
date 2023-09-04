@@ -6,7 +6,12 @@ DATA = joinpath(@__DIR__, "..", "..", "data", "Data")
 function solve_ipm(data::OTProj.OTData, delta)
     max_iter = 300
 
-    nlp = OTProj.OTCompactModel(data, delta; eval_hessian=false)
+    # Scaling
+    a = 10.0
+    b = 1.0
+    data2 = OTProj.OTData(data.w .* a, data.q .* a, data.d ./ (a * b))
+    nlp = OTProj.OTCompactModel(data2, delta / b; eval_hessian=false)
+
     # Build MadNLP
     madnlp_options = Dict{Symbol, Any}()
     madnlp_options[:linear_solver] = LapackCPUSolver
@@ -14,16 +19,21 @@ function solve_ipm(data::OTProj.OTData, delta)
     madnlp_options[:dual_initialized] = true
     madnlp_options[:max_iter] = max_iter
     madnlp_options[:print_level] = MadNLP.ERROR
-    madnlp_options[:tol] = 1e-9
+    madnlp_options[:tol] = 1e-8      # 1e-7
+    madnlp_options[:mu_min] = 1e-11  # 1e-10
+    madnlp_options[:bound_fac] = 0.2
+    madnlp_options[:bound_push] = 100.0
+
     opt_ipm, opt_linear, logger = MadNLP.load_options(; madnlp_options...)
 
     KKT = OTProj.OTKKTSystem{Float64, Vector{Int}, Vector{Float64}, Matrix{Float64}}
     solver = MadNLP.MadNLPSolver{Float64, KKT}(nlp, opt_ipm, opt_linear; logger=logger)
-    MadNLP.solve!(solver)
+    l_solve!(solver)
 
     sol = solver.obj_val
     p = data.A2 * solver.x.x
     niter = solver.cnt.k
+    println(solver.status, " ", niter)
     t_ipm = solver.cnt.total_time
     return p, sol, niter, t_ipm
 end

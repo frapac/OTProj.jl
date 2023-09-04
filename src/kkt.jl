@@ -24,7 +24,7 @@ function OTKKTSystem{T, VI, VT, MT}(nlp::OTCompactModel, ind_cons=MadNLP.get_ind
 
     z1  = zeros(L*S)
     z2  = zeros(L*S)
-    b1  = zeros(L)
+    b1  = zeros(S)
     return OTKKTSystem{T, VI, VT, MT}(
         aug_com, nlp.data, K,
         pr_diag, du_diag,
@@ -69,6 +69,36 @@ function MadNLP.set_jacobian_scaling!(kkt::OTKKTSystem{T,VI,VT,MT}, constraint_s
     # TODO
 end
 
+function _mul_expanded!(y::AbstractVector, kkt::OTKKTSystem, x::AbstractVector)
+    S, L = kkt.data.S, kkt.data.L
+    A1 = RowOperator{Float64}(L, S)
+    A2 = ColumnOperator{Float64}(L, S)
+
+    n = L * S
+
+    yx = view(y, 1:n)
+    yy = view(y, n+3:n+2+L)
+    xx = view(x, 1:n)
+    xy = view(x, n+3:n+2+L)
+    Σₓ = view(kkt.pr_diag, 1:n)
+    Ax = kkt.b1
+
+    # / x
+    yx .= Σₓ .* xx
+    mul!(Ax, A2, xx)
+    mul!(yx, A2', Ax, 1.0, 1.0)
+    mul!(yx, A1', xy, 1.0, 1.0)
+    axpy!(x[n+2], kkt.data.d, yx)
+    # / s
+    y[n+1] = kkt.pr_diag[n+1] * x[n+1] - x[n+2]
+    # / z
+    y[n+2] = dot(kkt.data.d, xx) - x[n+1]
+    # / y
+    mul!(yy, A1, xx)
+    return
+end
+
+
 function MadNLP.mul!(y::AbstractVector, kkt::OTKKTSystem, x::AbstractVector)
     if size(kkt.aug_com, 1) == length(x) == length(y)
         mul!(y, kkt.aug_com, x)
@@ -104,6 +134,24 @@ function MadNLP.compress_hessian!(kkt::OTKKTSystem)
     return
 end
 
+function MadNLP.eval_jac_wrapper!(
+    solver::MadNLP.MadNLPSolver,
+    kkt::OTKKTSystem{T, VI, VT, MT},
+    x::MadNLP.PrimalVector{T},
+) where {T, VI, VT, MT}
+    return # do nothing
+end
+
+function MadNLP.eval_lag_hess_wrapper!(
+    solver::MadNLP.MadNLPSolver,
+    kkt::OTKKTSystem{T, VI, VT, MT},
+    x::MadNLP.PrimalVector{T},
+    l::Vector{T};
+    is_resto=false,
+) where {T, VI, VT, MT}
+    return # do nothing
+end
+
 function MadNLP.build_kkt!(kkt::OTKKTSystem)
     L, S = kkt.data.L, kkt.data.S
     update_internal!(kkt)
@@ -120,16 +168,10 @@ function MadNLP.build_kkt!(kkt::OTKKTSystem)
     return
 end
 
-function MadNLP.solve_refine_wrapper!(
-    solver::MadNLP.MadNLPSolver{T, <:OTKKTSystem{T,VI,VT,MT}},
-    xm::MadNLP.AbstractKKTVector,
-    bm::MadNLP.AbstractKKTVector,
-) where {T, VI, VT, MT}
+function backsolve!(x::AbstractVector, solver::MadNLP.MadNLPSolver, b::AbstractVector)
     kkt = solver.kkt
     S, L = kkt.data.S, kkt.data.L
     z1 = kkt.z1  # buffer L x S
-    x = MadNLP.primal_dual(xm)
-    b = MadNLP.primal_dual(bm)
 
     nx = S * L
 
@@ -149,16 +191,16 @@ function MadNLP.solve_refine_wrapper!(
 
     # Schur-complement w.r.t inequality constraint
     w1 = v1 .+ (ρ * v3 + v2) .* kkt.data.d
-    w2 = v4
 
-    Δyy .= w2
+    Δyy .= v4
     ldiv!(z1, kkt.K, w1)
     mul!(Δyy, kkt.data.A1, z1, 1.0, -1.0)
 
     solver.cnt.linear_solver_time += @elapsed begin
+        # status = solve_refine!(Δy, solver.linear_solver, Δyy)
         status = MadNLP.solve!(solver.linear_solver, Δyy)
+        Δy .= Δyy
     end
-    Δy .= Δyy
 
     # Recover Δx
     z1 .= w1
@@ -173,21 +215,84 @@ function MadNLP.solve_refine_wrapper!(
     return true
 end
 
-function MadNLP.eval_jac_wrapper!(
-    solver::MadNLP.MadNLPSolver,
-    kkt::OTKKTSystem{T, VI, VT, MT},
-    x::MadNLP.PrimalVector{T},
+function MadNLP.solve_refine_wrapper!(
+    solver::MadNLP.MadNLPSolver{T, <:OTKKTSystem{T,VI,VT,MT}},
+    xm::MadNLP.AbstractKKTVector,
+    bm::MadNLP.AbstractKKTVector,
 ) where {T, VI, VT, MT}
-    return # do nothing
+    x = MadNLP.primal_dual(xm)
+    b = MadNLP.primal_dual(bm)
+    # return backsolve!(x, solver, b)
+    res = similar(b)
+    rep = similar(b)
+    norm_b = norm(b, Inf)
+
+    fill!(x, zero(T))
+    fill!(res, zero(T))
+
+    axpy!(-1, b, res)                           # ϵ = -b
+
+    iter = 0
+    residual_ratio_old = Inf
+    residual_ratio = Inf
+    noprogress = 0
+
+    max_iter = 5
+
+    while true
+        if (iter > max_iter) || (residual_ratio < 1e-12)
+            break
+        end
+        iter += 1
+
+        rep .= res
+        backsolve!(res, solver, rep)
+        # MadNLP.solve!(solver, res)              # ϵ = -A⁻¹ b
+        axpy!(-1, res, x)                       # x = x + A⁻¹ b
+        mul!(res, solver.kkt, x)              # ϵ = A x
+        axpy!(-1, b, res)                       # ϵ = Ax - b
+
+        norm_res = norm(res, Inf)
+        residual_ratio = norm_res / (one(T)+norm_b)
+        residual_ratio_old = residual_ratio
+    end
+    return true
 end
 
-function MadNLP.eval_lag_hess_wrapper!(
-    solver::MadNLP.MadNLPSolver,
-    kkt::OTKKTSystem{T, VI, VT, MT},
-    x::MadNLP.PrimalVector{T},
-    l::Vector{T};
-    is_resto=false,
-) where {T, VI, VT, MT}
-    return # do nothing
+function solve_refine!(
+    x::AbstractVector{T},
+    solver::MadNLP.AbstractLinearSolver,
+    b::AbstractVector{T},
+) where T
+
+    res = similar(b)
+    norm_b = norm(b, Inf)
+
+    fill!(x, zero(T))
+    fill!(res, zero(T))
+
+    axpy!(-1, b, res)                           # ϵ = -b
+
+    iter = 0
+    residual_ratio_old = Inf
+    residual_ratio = Inf
+    noprogress = 0
+
+    max_iter = 1
+    while true
+        if (iter > max_iter) || (residual_ratio < 1e-16)
+            break
+        end
+        iter += 1
+
+        MadNLP.solve!(solver, res)              # ϵ = -A⁻¹ b
+        axpy!(-1, res, x)                       # x = x + A⁻¹ b
+        mul!(res, solver.dense, x)              # ϵ = A x
+        axpy!(-1, b, res)                       # ϵ = Ax - b
+
+        norm_res = norm(res, Inf)
+        residual_ratio = norm_res / (one(T)+norm_b)
+        residual_ratio_old = residual_ratio
+    end
 end
 

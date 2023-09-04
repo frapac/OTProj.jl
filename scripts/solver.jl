@@ -1,5 +1,14 @@
 using LinearAlgebra
 
+if isnothing(GRB_ENV)
+    GRB_ENV = Gurobi.Env(output_flag=0)
+end
+
+function mean_runtime(values; delta=10)
+    N = length(values)
+    return exp(sum(log(v + delta) for v in values) / N) - delta
+end
+
 function init_slacks!(solver::MadNLP.MadNLPSolver)
     dlb = MadNLP.dual_lb(solver.d)
     @inbounds @simd for i in eachindex(dlb)
@@ -13,6 +22,39 @@ function init_slacks!(solver::MadNLP.MadNLPSolver)
     return
 end
 
+function set_initial_bounds!(solver::MadNLP.MadNLPSolver{T}) where T
+    tol = solver.opt.tol
+    @inbounds @simd for i in eachindex(solver.xl_r)
+        solver.xl_r[i] -= max(one(T),abs(solver.xl_r[i])) * tol
+    end
+    @inbounds @simd for i in eachindex(solver.xu_r)
+        solver.xu_r[i] += max(one(T),abs(solver.xu_r[i])) * tol
+    end
+end
+
+function set_initial_primal_rhs!(solver)
+    px = MadNLP.primal(solver.p)
+    fill!(px, 0.0)
+    py = MadNLP.dual(solver.p)
+
+    # Constraint
+    c = solver.c
+    @inbounds @simd for i in eachindex(py)
+        py[i] = -c[i]
+    end
+    return
+end
+
+function init_least_square_primals!(solver::MadNLP.AbstractMadNLPSolver)
+    set_initial_primal_rhs!(solver)
+    MadNLP.initialize!(solver.kkt)
+    MadNLP.factorize_wrapper!(solver)
+    is_solved = MadNLP.solve_refine_wrapper!(solver, solver.d, solver.p)
+    @assert is_solved
+    copyto!(MadNLP.primal(solver.x), MadNLP.primal(solver.d))
+    return
+end
+
 function l_initialize!(solver::MadNLP.AbstractMadNLPSolver{T}) where T
     # initializing slack variables
     NLPModels.cons!(solver.nlp,MadNLP.get_x0(solver.nlp),MadNLP._madnlp_unsafe_wrap(solver.c,MadNLP.get_ncon(solver.nlp)))
@@ -20,11 +62,22 @@ function l_initialize!(solver::MadNLP.AbstractMadNLPSolver{T}) where T
     copyto!(MadNLP.slack(solver.x), solver.c_slk)
 
     # Initialization
-    fill!(solver.zl_r, one(T))
-    fill!(solver.zu_r, one(T))
+    fill!(solver.zl_r, solver.opt.bound_push)
+    fill!(solver.zu_r, solver.opt.bound_push)
 
-    MadNLP.set_initial_bounds!(solver)
-    copyto!(MadNLP.primal(solver.x), MadNLP.get_x0(solver.nlp))
+    set_initial_bounds!(solver)
+
+    init_least_square_primals!(solver)
+    MadNLP.initialize_variables!(
+        MadNLP.full(solver.x),
+        MadNLP.full(solver.xl),
+        MadNLP.full(solver.xu),
+        solver.opt.bound_push, solver.opt.bound_fac
+    )
+
+    # copyto!(MadNLP.primal(solver.x), MadNLP.get_x0(solver.nlp))
+    # solver.x.s[1] = - solver.opt.bound_push
+    # solver.x.x .= solver.opt.bound_push
 
     # Automatic scaling (constraints)
     MadNLP.eval_jac_wrapper!(solver, solver.kkt, solver.x)
@@ -36,18 +89,6 @@ function l_initialize!(solver::MadNLP.AbstractMadNLPSolver{T}) where T
     solver.obj_val = MadNLP.eval_f_wrapper(solver, solver.x)
     MadNLP.eval_cons_wrapper!(solver, solver.c, solver.x)
     MadNLP.eval_lag_hess_wrapper!(solver, solver.kkt, solver.x, solver.y)
-
-    # Change initial variable
-    # MadNLP.jtprod!(solver.jacl, solver.kkt, solver.y)
-    # MadNLP.set_aug_diagonal!(solver.kkt, solver)
-    # MadNLP.factorize_wrapper!(solver)
-
-    # set_predictive_rhs!(solver, solver.kkt)
-    # MadNLP.solve_refine_wrapper!(solver, solver.d, solver.p)
-    # MadNLP.finish_aug_solve!(solver, solver.kkt, 0.0)
-
-    # init_slacks!(solver)
-
 
     theta = MadNLP.get_theta(solver.c)
     solver.theta_max = 1e4*max(1,theta)
@@ -91,6 +132,7 @@ function get_affine_complementarity_measure(solver::MadNLP.MadNLPSolver, alpha_p
     m1, m2 = length(solver.x_lr), length(solver.x_ur)
     dz1 =  MadNLP.dual_lb(solver.d)
     dz2 =  MadNLP.dual_ub(solver.d)
+    @assert all(isfinite, solver.d.values)
 
     inf_compl = 0.0
     @inbounds @simd for i in 1:m1
@@ -174,14 +216,12 @@ function get_correction!(
     solver::MadNLP.MadNLPSolver,
     correction_lb,
     correction_ub,
-    ind_lb,
-    ind_ub,
 )
     dx = MadNLP.primal(solver.d)
     dlb = MadNLP.dual_lb(solver.d)
     dub = MadNLP.dual_ub(solver.d)
 
-    tol = 1e-8
+    tol = 1e-9 # ref: 1e-9
     for i in eachindex(dlb)
         dd = solver.dx_lr[i] * dlb[i]
         if abs(dd) > tol
@@ -196,6 +236,46 @@ function get_correction!(
             correction_ub[i] = dd
         else
             correction_ub[i] = 0.0
+        end
+    end
+    return
+end
+
+function set_extra_correction!(
+    solver::MadNLPSolver,
+    correction_lb, correction_ub,
+    alpha_p, alpha_d, βmin, βmax, μ,
+)
+    dx = MadNLP.primal(solver.d)
+    dlb = MadNLP.dual_lb(solver.d)
+    dub = MadNLP.dual_ub(solver.d)
+
+    tmin, tmax = βmin * μ , βmax * μ
+    # / Lower-bound
+    for i in eachindex(dlb)
+        x_ = solver.x_lr[i] + alpha_p * solver.dx_lr[i] - solver.xl_r[i]
+        z_ = solver.zl_r[i] + alpha_d * dlb[i]
+        v = x_ * z_
+        correction_lb[i] -= if v < tmin
+            tmin - v
+        elseif v > tmax
+            tmax - v
+        else
+            0.0
+        end
+    end
+
+    # / Upper-bound
+    for i in eachindex(dub)
+        x_ = solver.xu_r[i] - alpha_p * solver.dx_ur[i] - solver.x_ur[i]
+        z_ = solver.zu_r[i] + alpha_d * dub[i]
+        v = x_ * z_
+        correction_ub[i] += if v < tmin
+            tmin - v
+        elseif v > tmax
+            tmax - v
+        else
+            0.0
         end
     end
     return
@@ -251,7 +331,6 @@ function mpc!(solver::MadNLP.AbstractMadNLPSolver)
             return MadNLP.MAXIMUM_ITERATIONS_EXCEEDED
         end
 
-
         #####
         # Factorize
         #####
@@ -285,7 +364,7 @@ function mpc!(solver::MadNLP.AbstractMadNLPSolver)
 
         # Primal step
         mu_affine = get_affine_complementarity_measure(solver, alpha_aff, alpha_aff)
-        get_correction!(solver, correction_lb, correction_ub, ind_cons.ind_lb, ind_cons.ind_ub)
+        get_correction!(solver, correction_lb, correction_ub)
 
         #####
         # Update barrier
@@ -293,13 +372,17 @@ function mpc!(solver::MadNLP.AbstractMadNLPSolver)
         # μ = y' s / m
         mu_curr = get_complementarity_measure(solver)
         sigma = (mu_affine / mu_curr)^3
-        sigma = clamp(sigma, 1e-6, 10.0 )
+        sigma = clamp(sigma, 1e-6, 10.0)
+        if isnan(sigma)
+            println(mu_affine)
+            println(mu_curr)
+        end
         mu = max(solver.opt.mu_min, sigma * mu_curr)
         tau = MadNLP.get_tau(mu, solver.opt.tau_min)
         solver.mu = mu
 
         #####
-        # Correction step
+        # Mehrotra's Correction step
         #####
         set_corrective_rhs!(solver, solver.kkt, mu, correction_lb, correction_ub, ind_cons.ind_lb, ind_cons.ind_ub)
         MadNLP.solve_refine_wrapper!(solver, solver.d, solver.p)
@@ -319,15 +402,72 @@ function mpc!(solver::MadNLP.AbstractMadNLPSolver)
             MadNLP.dual_ub(solver.d),
             tau,
         )
-        solver.alpha = 0.9995 * min(alpha_p, alpha_d)
-        solver.alpha_z = solver.alpha
+
+        #####
+        # Gondzio's additional correction
+        #####
+        # max_ncorr = 4
+        # δ = 0.1
+        # γ = 0.1
+        # βmin = 0.1
+        # βmax = 10.0
+        # Δp = similar(solver.d.values)
+        # for ncorr in 1:max_ncorr
+        #     # Enlarge step sizes in primal and dual spaces.
+        #     tilde_alpha_p = min(alpha_p + δ, 1.0)
+        #     tilde_alpha_d = min(alpha_d + δ, 1.0)
+        #     # Apply Mehrotra's heuristic for centering parameter mu.
+        #     ga = get_affine_complementarity_measure(solver, tilde_alpha_p, tilde_alpha_d)
+        #     g = mu_curr
+        #     mu = (ga / g)^2 * ga    # Eq. (12)
+
+        #     # Add additional correction
+        #     set_extra_correction!(
+        #         solver, correction_lb, correction_ub,
+        #         tilde_alpha_p, tilde_alpha_d, βmin, βmax, mu,
+        #     )
+
+        #     # Update RHS.
+        #     set_corrective_rhs!(solver, solver.kkt, mu, correction_lb, correction_ub, ind_cons.ind_lb, ind_cons.ind_ub)
+        #     # Solve KKT linear system.
+        #     copyto!(Δp, solver.d.values)
+        #     MadNLP.solve_refine_wrapper!(solver, solver.d, solver.p)
+        #     finish_corrective_aug_solve!(solver, solver.kkt, correction_lb, correction_ub, mu)
+
+        #     hat_alpha_p = get_alpha_max_primal(
+        #         MadNLP.primal(solver.x),
+        #         MadNLP.primal(solver.xl),
+        #         MadNLP.primal(solver.xu),
+        #         MadNLP.primal(solver.d),
+        #         tau,
+        #     )
+        #     hat_alpha_d = get_alpha_max_dual(
+        #         solver.zl_r,
+        #         solver.zu_r,
+        #         MadNLP.dual_lb(solver.d),
+        #         MadNLP.dual_ub(solver.d),
+        #         tau,
+        #     )
+        #     # Stop extra correction if the stepsize does not increase sufficiently
+        #     # if (hat_alpha_p < alpha_p + γ * δ) || (hat_alpha_d < alpha_d + γ * δ)
+        #     if (hat_alpha_p < 1.01 * alpha_p) || (hat_alpha_d < 1.01 * alpha_d)
+        #         copyto!(solver.d.values, Δp)
+        #         break
+        #     else
+        #         alpha_p = hat_alpha_p
+        #         alpha_d = hat_alpha_d
+        #     end
+        # end
 
         #####
         # Next trial point
         #####
+        solver.alpha = 0.9995 * min(alpha_p, alpha_d)
+        solver.alpha_z = solver.alpha
         # Update primal-dual solution
         axpy!(solver.alpha, MadNLP.primal(solver.d), MadNLP.primal(solver.x))
         axpy!(solver.alpha, MadNLP.dual(solver.d), solver.y)
+
         solver.zl_r .+= solver.alpha_z .* MadNLP.dual_lb(solver.d)
         solver.zu_r .+= solver.alpha_z .* MadNLP.dual_ub(solver.d)
 
@@ -335,8 +475,10 @@ function mpc!(solver::MadNLP.AbstractMadNLPSolver)
         MadNLP.eval_cons_wrapper!(solver, solver.c, solver.x)
         MadNLP.eval_grad_f_wrapper!(solver, solver.f, solver.x)
 
+        adjusted = MadNLP.adjust_boundary!(solver.x_lr,solver.xl_r,solver.x_ur,solver.xu_r,solver.mu)
 
         solver.cnt.k+=1
+        solver.cnt.l=1
     end
 end
 
@@ -525,7 +667,7 @@ function l_solve!(
     try
         MadNLP.@notice(solver.logger,"This is MadLP, running with $(MadNLP.introduce(solver.linear_solver))\n")
         MadNLP.print_init(solver)
-        MadNLP.initialize!(solver)
+        l_initialize!(solver)
         solver.status = mpc!(solver)
     catch e
         if e isa MadNLP.InvalidNumberException

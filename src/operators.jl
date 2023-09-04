@@ -85,7 +85,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::Abstr
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}) where T <: Number
     S, L = A.parent.S, A.parent.L
     for l in 1:L
         @turbo for s in 1:S
@@ -94,7 +94,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T <: Number
     S, L = A.parent.S, A.parent.L
     for l in 1:L
         @turbo for s in 1:S
