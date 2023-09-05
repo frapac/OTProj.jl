@@ -197,7 +197,6 @@ function backsolve!(x::AbstractVector, solver::MadNLP.MadNLPSolver, b::AbstractV
     mul!(Δyy, kkt.data.A1, z1, 1.0, -1.0)
 
     solver.cnt.linear_solver_time += @elapsed begin
-        # status = solve_refine!(Δy, solver.linear_solver, Δyy)
         status = MadNLP.solve!(solver.linear_solver, Δyy)
         Δy .= Δyy
     end
@@ -230,7 +229,7 @@ function MadNLP.solve_refine_wrapper!(
     fill!(x, zero(T))
     fill!(res, zero(T))
 
-    axpy!(-1, b, res)                           # ϵ = -b
+    axpy!(-1, b, res)                        # ϵ = -b
 
     iter = 0
     residual_ratio_old = Inf
@@ -246,11 +245,10 @@ function MadNLP.solve_refine_wrapper!(
         iter += 1
 
         rep .= res
-        backsolve!(res, solver, rep)
-        # MadNLP.solve!(solver, res)              # ϵ = -A⁻¹ b
-        axpy!(-1, res, x)                       # x = x + A⁻¹ b
-        mul!(res, solver.kkt, x)              # ϵ = A x
-        axpy!(-1, b, res)                       # ϵ = Ax - b
+        backsolve!(res, solver, rep)        # ϵ = -A⁻¹ b
+        axpy!(-1, res, x)                   # x = x + A⁻¹ b
+        mul!(res, solver.kkt, x)            # ϵ = A x
+        axpy!(-1, b, res)                   # ϵ = Ax - b
 
         norm_res = norm(res, Inf)
         residual_ratio = norm_res / (one(T)+norm_b)

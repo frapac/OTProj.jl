@@ -1,9 +1,5 @@
 using LinearAlgebra
 
-if isnothing(GRB_ENV)
-    GRB_ENV = Gurobi.Env(output_flag=0)
-end
-
 function mean_runtime(values; delta=10)
     N = length(values)
     return exp(sum(log(v + delta) for v in values) / N) - delta
