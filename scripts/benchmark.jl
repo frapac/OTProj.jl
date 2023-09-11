@@ -1,7 +1,20 @@
 
 using OTProj
+using NLPModels
+using MadNLP
+using DelimitedFiles
+using JuMP
+using Gurobi
 
 DATA = joinpath(@__DIR__, "..", "..", "data", "Data")
+RESULTS = joinpath(@__DIR__, "..", "results")
+
+include(joinpath(@__DIR__, "solver.jl"))
+
+GRB_ENV = nothing
+if isnothing(GRB_ENV)
+    GRB_ENV = Gurobi.Env(output_flag=0)
+end
 
 function solve_ipm(data::OTProj.OTData, delta)
     max_iter = 300
@@ -19,8 +32,8 @@ function solve_ipm(data::OTProj.OTData, delta)
     madnlp_options[:dual_initialized] = true
     madnlp_options[:max_iter] = max_iter
     madnlp_options[:print_level] = MadNLP.ERROR
-    madnlp_options[:tol] = 1e-8      # 1e-7
-    madnlp_options[:mu_min] = 1e-11  # 1e-10
+    madnlp_options[:tol] = 1e-8
+    madnlp_options[:mu_min] = 1e-11
     madnlp_options[:bound_fac] = 0.2
     madnlp_options[:bound_push] = 100.0
 
@@ -31,7 +44,7 @@ function solve_ipm(data::OTProj.OTData, delta)
     l_solve!(solver)
 
     sol = solver.obj_val
-    p = data.A2 * solver.x.x
+    p = (data.A2 * solver.x.x) ./ a
     niter = solver.cnt.k
     println(solver.status, " ", niter)
     t_ipm = solver.cnt.total_time
@@ -39,7 +52,7 @@ function solve_ipm(data::OTProj.OTData, delta)
 end
 
 function benchmark(class, resolution; distance=2)
-    results = zeros(45, 10)
+    results = zeros(45, 12)
     optimizer = () -> Gurobi.Optimizer(GRB_ENV)
 
     cnt = 1
@@ -58,8 +71,12 @@ function benchmark(class, resolution; distance=2)
         # Gurobi
         modelQP = OTProj.build_projection_wasserstein_qp(data, 0.5 * valLP)
         JuMP.set_optimizer(modelQP, optimizer)
+        JuMP.set_attribute(modelQP, "Threads", 1)
+        JuMP.set_attribute(modelQP, "Method", 2)
+        JuMP.set_attribute(modelQP, "Presolve", 0)
         t_gurobi = @elapsed JuMP.optimize!(modelQP)
         solGur = JuMP.objective_value(modelQP)
+        pGur = JuMP.value.(modelQP[:p])
 
         # Bundle
         t_bundle = @elapsed begin
@@ -77,9 +94,11 @@ function benchmark(class, resolution; distance=2)
         results[cnt, 5] = t_bundle
         results[cnt, 6] = solBundle
         results[cnt, 7] = iterBundle
-        results[cnt, 8] = t_ipm
-        results[cnt, 9] = solIpm
-        results[cnt, 10] = iterIpm
+        results[cnt, 8] = norm(pGur .- pBundle, Inf) / norm(pGur, Inf)
+        results[cnt, 9] = t_ipm
+        results[cnt, 10] = solIpm
+        results[cnt, 11] = iterIpm
+        results[cnt, 12] = norm(pGur .- pIpm, Inf) / norm(pGur, Inf)
 
         cnt += 1
     end
@@ -87,3 +106,24 @@ function benchmark(class, resolution; distance=2)
 end
 
 results = benchmark("Shapes", 32)
+# classes = [
+#     "CauchyDensity",
+#     "ClassicImages",
+#     "GRFmoderate",
+#     "GRFrough",
+#     "GRFsmooth",
+#     "LogGRF",
+#     "LogitGRF",
+#     "MicroscopyImages",
+#     "Shapes",
+#     "WhiteNoise",
+# ]
+# resolution = 32
+
+# for class in classes
+#     @info "\n $class"
+#     results = benchmark(class, resolution)
+#     dest = joinpath(RESULTS, "$(class)_$(resolution).txt")
+#     writedlm(dest, results)
+# end
+

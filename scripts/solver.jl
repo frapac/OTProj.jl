@@ -217,22 +217,11 @@ function get_correction!(
     dlb = MadNLP.dual_lb(solver.d)
     dub = MadNLP.dual_ub(solver.d)
 
-    tol = 1e-9 # ref: 1e-9
     for i in eachindex(dlb)
-        dd = solver.dx_lr[i] * dlb[i]
-        if abs(dd) > tol
-            correction_lb[i] = dd
-        else
-            correction_lb[i] = 0.0
-        end
+        correction_lb[i] = solver.dx_lr[i] * dlb[i]
     end
     for i in eachindex(dub)
-        dd = solver.dx_ur[i] * dub[i]
-        if abs(dd) > tol
-            correction_ub[i] = dd
-        else
-            correction_ub[i] = 0.0
-        end
+        correction_ub[i] = solver.dx_ur[i] * dub[i]
     end
     return
 end
