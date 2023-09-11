@@ -232,11 +232,10 @@ function MadNLP.solve_refine_wrapper!(
     axpy!(-1, b, res)                        # ϵ = -b
 
     iter = 0
-    residual_ratio_old = Inf
     residual_ratio = Inf
     noprogress = 0
 
-    max_iter = 5
+    max_iter = 10
 
     while true
         if (iter > max_iter) || (residual_ratio < 1e-12)
@@ -252,45 +251,7 @@ function MadNLP.solve_refine_wrapper!(
 
         norm_res = norm(res, Inf)
         residual_ratio = norm_res / (one(T)+norm_b)
-        residual_ratio_old = residual_ratio
     end
     return true
-end
-
-function solve_refine!(
-    x::AbstractVector{T},
-    solver::MadNLP.AbstractLinearSolver,
-    b::AbstractVector{T},
-) where T
-
-    res = similar(b)
-    norm_b = norm(b, Inf)
-
-    fill!(x, zero(T))
-    fill!(res, zero(T))
-
-    axpy!(-1, b, res)                           # ϵ = -b
-
-    iter = 0
-    residual_ratio_old = Inf
-    residual_ratio = Inf
-    noprogress = 0
-
-    max_iter = 1
-    while true
-        if (iter > max_iter) || (residual_ratio < 1e-16)
-            break
-        end
-        iter += 1
-
-        MadNLP.solve!(solver, res)              # ϵ = -A⁻¹ b
-        axpy!(-1, res, x)                       # x = x + A⁻¹ b
-        mul!(res, solver.dense, x)              # ϵ = A x
-        axpy!(-1, b, res)                       # ϵ = Ax - b
-
-        norm_res = norm(res, Inf)
-        residual_ratio = norm_res / (one(T)+norm_b)
-        residual_ratio_old = residual_ratio
-    end
 end
 

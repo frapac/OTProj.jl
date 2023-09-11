@@ -86,7 +86,7 @@ function ots(model::JuMP.Model, u, p, target)
     return (JuMP.objective_value(model), JuMP.value.(model[:x]), JuMP.dual.(model[:con2]))
 end
 
-function ots(smd::SoftMaxModel, u, p, target)
+function ots(smd::SoftMaxModel, u, p, target; toleps=1e-4)
     data = smd.data
     S, L = data.S, data.L
 
@@ -94,7 +94,7 @@ function ots(smd::SoftMaxModel, u, p, target)
     iMax = 100
     tolstep = 1e-5
     tolopt = 1e-5
-    eps = 1e-2
+    eps = toleps
     epsmin = 1e-5
     tot_it = 0
 
@@ -114,14 +114,14 @@ function ots(smd::SoftMaxModel, u, p, target)
         it_cur = optimizer.isave[30]
 
         tot_it += it_cur
-        if eps <= epsmin
+        if eps <= toleps
             break
         end
         if -vals > target
             break
         end
         eta = max(0.5, min(it_cur / iMax, 0.8))
-        eps = max(eta * eps, epsmin)
+        eps = max(eta * eps, toleps)
     end
 
     u = u .- mean(u)
@@ -151,7 +151,7 @@ function proj_wass_bundle(
     target = delta + 2*tol
 
     # c, _, u = optimal_transport(d, p, q)
-    c, _, u = ots(smd, u, p, target)
+    c, _, u = ots(smd, u, p, target; toleps=1e-5)
     G = zeros(1, S)
     G[1, :] .= u
 
@@ -161,9 +161,9 @@ function proj_wass_bundle(
     for k in 1:kMax
         p, mu = bundle_problem(optimizer, data.w, p, delta, G, rhs)
         # c, _, u = optimal_transport(d, p, q)
-        c, _, u = ots(smd, u, p, target)
+        c, _, u = ots(smd, u, p, target; toleps=1e-5)
 
-        if c - delta <= tol
+        if abs(c - delta) <= tol
             break
         end
 
