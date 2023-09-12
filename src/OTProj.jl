@@ -9,7 +9,10 @@ using Statistics
 
 using JuMP
 
+using KernelAbstractions
 using LoopVectorization
+
+const KA = KernelAbstractions
 
 import NLPModels
 import MadNLP

@@ -13,7 +13,7 @@ function _sum_vector(Bd, i, j, S)
 end
 
 # TODO: Store sum of pr_diag
-function assemble!(C::AbstractMatrix, K::OTCondensedBlock)
+function assemble_simd!(C::AbstractMatrix, K::OTCondensedBlock)
     L, S = K.data.L, K.data.S
     # We assume all inner values have been updated previously with init!
     # Load buffers
@@ -65,6 +65,76 @@ function assemble!(C::AbstractMatrix, K::OTCondensedBlock)
         acc = _sum_vector(Bd, i, j, S)
         C[i, j] -= γ * acc
     end
+
+    return
+end
+
+@kernel function _assemble_kernel!(
+    C,
+    @Const(θ),
+    @Const(D),
+    @Const(Bd),
+    γ,
+    L,
+    S,
+)
+    i, j = @index(Global, NTuple)
+
+    @inbounds begin
+        if i == j
+            for s in 1:S
+                C[i, i] += θ[s + S * (i - 1)]
+            end
+        end
+        if j <= i
+            acc = 0.0
+            @simd for s in 1:S
+                acc += θ[s + S * (i-1)] * θ[s + S * (j-1)] / D[s]
+            end
+            C[i, j] -= acc
+            acc1, acc2 = 0.0, 0.0
+            @simd for s in 1:S
+                acc1 += Bd[s + S*(i-1)]
+                acc2 += Bd[s + S*(j-1)]
+            end
+            C[i, j] -= γ * acc1 * acc2
+        end
+    end
+end
+
+function assemble_multithreads!(C::AbstractMatrix, K::OTCondensedBlock)
+    L, S = K.data.L, K.data.S
+    # We assume all inner values have been updated previously with init!
+    # Load buffers
+    d = K.data.d
+    Bd = K.a1
+    θ = K.a2
+    buffer = K.a3
+    D = K.B.V
+    ρ = K.ρ[1]
+
+    # NB: inverse operation is expensive
+    @inbounds for i in 1:L*S
+        θ[i] = 1.0 / K.B.Σ[i]
+    end
+
+    fill!(D, 1.0)
+    @inbounds for s in 1:S, l in 1:L
+        D[s] += θ[s + S*(l-1)]
+    end
+
+    # Evaluate coefficient for inequality inverse block
+    ldiv!(Bd, K.B, d)                   # B⁻¹ d
+    γ = ρ / (1.0 + ρ * dot(d, Bd))      # dᵀ B⁻¹ d
+
+    # Reset matrix
+    workgroup_size = 1024
+    backend = CPU()
+    fill!(C, 0.0)
+
+    ndrange = (L, L)
+    _assemble_kernel!(backend)(C, θ, D, Bd, γ, L, S, ndrange=ndrange)
+    KA.synchronize(backend)
 
     return
 end

@@ -160,7 +160,7 @@ function MadNLP.build_kkt!(kkt::OTKKTSystem)
     z2 = kkt.z2
     b1 = kkt.b1
     # Assemble Schur-complement
-    assemble!(kkt.aug_com, kkt.K)
+    assemble_multithreads!(kkt.aug_com, kkt.K)
     # Symmetrize
     @inbounds for i in 1:L, j in (i+1):L
         kkt.aug_com[i, j] = kkt.aug_com[j, i]
