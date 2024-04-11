@@ -1,5 +1,4 @@
 
-
 struct OTCompactModel{T} <: NLPModels.AbstractNLPModel{T, Vector{T}}
     data::OTData{T}
     δ::T
@@ -130,18 +129,3 @@ function NLPModels.hess_coord!(ot::OTCompactModel, x, y, hess; obj_weight=1.0)
     copyto!(hess, ot.h_z)
     return
 end
-
-function MadNLP.scale_objective(ot::OTCompactModel, grad::AbstractVector; max_gradient=1e-8)
-    return 1e0
-end
-
-function MadNLP.scale_constraints!(
-    m::OTCompactModel,
-    con_scale::AbstractVector,
-    jac::AbstractMatrix;
-    max_gradient=1e-8,
-)
-    con_scale[1] = 1e0
-    con_scale[2:end] .= 1e0
-end
-
