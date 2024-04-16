@@ -76,6 +76,13 @@ end
 
 function NLPModels.obj(ot::OTCompactModel, x::Vector{T}) where T
     A2 = ColumnOperator{Float64}(ot.data.L, ot.data.S)
+    # nzval = 0
+    # for i in eachindex(x)
+    #     if x[i] > 1e-5
+    #         nzval += 1
+    #     end
+    # end
+    # println(nzval)
     residual = ot.res
     residual .= ot.data.w
     mul!(residual, A2, x, 1.0, -1.0)

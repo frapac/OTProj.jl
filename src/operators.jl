@@ -109,6 +109,7 @@ end
 struct OTQuadraticBlock{T}
     data::OTData{T}
     Σ::Vector{T}
+    invΣ::Vector{T}
     # Buffers
     a1::Vector{T}  # L x S
     b1::Vector{T}  # S
@@ -118,11 +119,12 @@ end
 
 function OTQuadraticBlock(data::OTData, sigma)
     L, S = data.L, data.S
+    invΣ = similar(sigma)
     a1 = zeros(L*S)
     b1 = zeros(S)
     V  = zeros(S)
     return OTQuadraticBlock(
-        data, sigma, a1, b1, V,
+        data, sigma, invΣ, a1, b1, V,
     )
 end
 
@@ -130,12 +132,19 @@ Base.size(B::OTQuadraticBlock) = (B.data.S * B.data.L, B.data.S * B.data.L)
 LinearAlgebra.issymmetric(B::OTQuadraticBlock) = true
 
 # Evaluate (I + A₂ Σ⁻¹ A₂')
+function _inv_sigma!(dest::Vector{T}, src::Vector{T}) where T
+    @turbo for i in eachindex(src)
+        dest[i] = one(T) / src[i]
+    end
+end
+
 function _update_inner_block!(B::OTQuadraticBlock)
     S, L = B.data.S, B.data.L
+    _inv_sigma!(B.invΣ, B.Σ)
     fill!(B.V, 1.0)
     @inbounds for s in 1:S
         for l in 1:L
-            B.V[s] += 1.0 / B.Σ[s + S*(l-1)]
+            B.V[s] += B.invΣ[s + S*(l-1)]
         end
     end
     return
@@ -156,13 +165,24 @@ end
 # Implement Woodbury formula
 function LinearAlgebra.ldiv!(y, B::OTQuadraticBlock, x)
     A2 = ColumnOperator{Float64}(B.data.L, B.data.S)
-    LS = B.data.L * B.data.S
-    scaldiv!(y, x, B.Σ, 1.0, 0.0, LS)     # Σ⁻¹ x
-    mul!(B.b1, A2, y)                     # A₂ Σ⁻¹ x
-    axdiv!(B.b1, B.V)
-    # B.b1 ./= B.V                        # V⁻¹A₂Σ⁻¹ x
-    mul!(B.a1, A2', B.b1)                 # A₂ᵀV⁻¹A₂Σ⁻¹ x
-    scaldiv!(y, B.a1, B.Σ, -1.0, 1.0, LS) # Σ⁻¹ x - Σ⁻¹A₂ᵀV⁻¹A₂Σ⁻¹ x
+    L, S = B.data.L, B.data.S
+    θ = B.invΣ
+
+    fill!(B.b1, 0.0)
+    @inbounds for l in 1:L
+        @turbo for s in 1:S
+            B.b1[s] += θ[s + S * (l-1)] * x[s + S * (l-1)]
+        end
+    end
+    @inbounds for s in 1:S
+        B.b1[s] = B.b1[s] / B.V[s]
+    end
+    @inbounds for l in 1:L
+        @turbo for s in 1:S
+            θi = θ[s + S * (l-1)]
+            y[s + S * (l-1)] = θi * (x[s + S * (l-1)] - B.b1[s])
+        end
+    end
     return y
 end
 
@@ -194,6 +214,8 @@ LinearAlgebra.issymmetric(K::OTCondensedBlock) = true
 
 function init!(K::OTCondensedBlock)
     init!(K.B)
+    ldiv!(K.a3, K.B, K.data.d)          # B⁻¹ d
+    return
 end
 
 function LinearAlgebra.mul!(y, K::OTCondensedBlock, x)
@@ -206,7 +228,6 @@ end
 # Implement Sherman-Morisson formula
 function LinearAlgebra.ldiv!(y, K::OTCondensedBlock, x)
     ldiv!(y, K.B, x)                       # B⁻¹ x
-    ldiv!(K.a3, K.B, K.data.d)             # B⁻¹ d
     r = 1.0 / K.ρ[1] + dot(K.data.d, K.a3) # ρ + d' B⁻¹ d
     dBx = dot(K.data.d, y)                 # dᵀB⁻¹ x
     y .-= K.a3 .* (dBx / r)                # B⁻¹ x - (B⁻¹ddᵀB⁻¹ x) / r

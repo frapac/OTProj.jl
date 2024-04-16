@@ -2,14 +2,12 @@
     Compute inverse explicitly.
 =#
 
-function _sum_vector(Bd, i, j, S)
+function _sum_vector(Bd, i,S)
     s1 = 0.0
-    s2 = 0.0
     @turbo for k in 1:S
         s1 += Bd[k + S * (i-1)]
-        s2 += Bd[k + S * (j-1)]
     end
-    return s1 * s2
+    return s1
 end
 
 # TODO: Store sum of pr_diag
@@ -18,24 +16,14 @@ function assemble_simd!(C::AbstractMatrix, K::OTCondensedBlock)
     # We assume all inner values have been updated previously with init!
     # Load buffers
     d = K.data.d
-    Bd = K.a1
-    θ = K.a2
-    buffer = K.a3
+    Bd = K.a3
+    θ = K.B.invΣ       # Σ⁻¹
+    buffer = K.a1
     D = K.B.V
     ρ = K.ρ[1]
 
     # NB: inverse operation is expensive
-    @inbounds for i in 1:L*S
-        θ[i] = 1.0 / K.B.Σ[i]
-    end
-
-    fill!(D, 1.0)
-    @inbounds for s in 1:S, l in 1:L
-        D[s] += θ[s + S*(l-1)]
-    end
-
     # Evaluate coefficient for inequality inverse block
-    ldiv!(Bd, K.B, d)                   # B⁻¹ d
     γ = ρ / (1.0 + ρ * dot(d, Bd))      # dᵀ B⁻¹ d
 
     # Reset matrix
@@ -61,9 +49,11 @@ function assemble_simd!(C::AbstractMatrix, K::OTCondensedBlock)
         end
     end
 
+    @inbounds for k in 1:L
+        buffer[k] = _sum_vector(Bd, k, S)
+    end
     @inbounds for i in 1:L, j in 1:i
-        acc = _sum_vector(Bd, i, j, S)
-        C[i, j] -= γ * acc
+        C[i, j] -= γ * buffer[i] * buffer[j]
     end
 
     return

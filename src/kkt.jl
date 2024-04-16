@@ -7,6 +7,7 @@ struct OTKKTSystem{T, VI, VT, MT, LS} <: MadNLP.AbstractReducedKKTSystem{T, VT, 
     aug_com::MT
     data::OTData{T}
     K::OTCondensedBlock{T}
+    AKA::NormalBlockOperator{T}
     reg::Vector{T}
     pr_diag::VT
     du_diag::VT
@@ -19,6 +20,7 @@ struct OTKKTSystem{T, VI, VT, MT, LS} <: MadNLP.AbstractReducedKKTSystem{T, VT, 
     # Buffers
     z1::VT # L x S
     z2::VT # L x S
+    z3::VT # L x S
     b1::VT # L
     linear_solver::LS
 end
@@ -45,18 +47,20 @@ function MadNLP.create_kkt_system(
     l_lower = zeros(nlb)
     u_lower = zeros(nub)
     K = OTCondensedBlock(nlp.data, zeros(L*S))
+    AKA = NormalBlockOperator(K)
 
     linear_solver_ = linear_solver(aug_com; opt=opt_linear_solver)
 
     z1  = zeros(L*S)
     z2  = zeros(L*S)
+    z3  = zeros(L)
     b1  = zeros(S)
     return OTKKTSystem{T, VI, VT, MT, typeof(linear_solver_)}(
-        aug_com, nlp.data, K,
+        aug_com, nlp.data, K, AKA,
         reg, pr_diag, du_diag,
         l_diag, u_diag, l_lower, u_lower,
         ind_cons.ind_lb, ind_cons.ind_ub,
-        z1, z2, b1,
+        z1, z2, z3, b1,
         linear_solver_,
     )
 end
@@ -67,7 +71,9 @@ MadNLP.get_jacobian(kkt::OTKKTSystem) = 0
 
 function update_internal!(kkt::OTKKTSystem)
     L, S = kkt.data.L, kkt.data.S
-    kkt.K.B.Σ .= kkt.pr_diag[1:L*S]
+    @turbo for i in 1:L*S
+        kkt.K.B.Σ[i] = kkt.pr_diag[i]
+    end
     kkt.K.ρ[1] = kkt.pr_diag[L*S+1]
     init!(kkt.K)
     return
@@ -152,6 +158,7 @@ function MadNLP.jtprod!(
 
     vA1 = view(x, 2:L+1)
     mul!(y_x, A1', vA1, 1.0, 1.0)
+
     return y
 end
 
@@ -171,7 +178,7 @@ function MadNLP.build_kkt!(kkt::OTKKTSystem)
     z2 = kkt.z2
     b1 = kkt.b1
     # Assemble Schur-complement
-    @time assemble_multithreads!(kkt.aug_com, kkt.K)
+    assemble_simd!(kkt.aug_com, kkt.K)
     # Symmetrize
     @inbounds for i in 1:L, j in (i+1):L
         kkt.aug_com[i, j] = kkt.aug_com[j, i]
@@ -180,20 +187,20 @@ function MadNLP.build_kkt!(kkt::OTKKTSystem)
 end
 
 function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
+    S, L = kkt.data.S, kkt.data.L
     # Build reduced KKT vector.
     MadNLP.reduce_rhs!(w.xp_lr, MadNLP.dual_lb(w), kkt.l_diag, w.xp_ur, MadNLP.dual_ub(w), kkt.u_diag)
 
+    A1 = RowOperator{Float64}(L, S)
+
     w_ = MadNLP.primal_dual(w)
-    S, L = kkt.data.S, kkt.data.L
     z1 = kkt.z1  # buffer L x S
+    z2 = kkt.z2
+    Δyy = kkt.z3
 
     nx = S * L
 
-    Σ = view(kkt.pr_diag, 1:nx)   # X^{-1} S
     ρ = kkt.pr_diag[nx+1]         # t / r
-
-    # Decompose left-hand side
-    Δyy = zeros(L)
 
     # Decompose right-hand side
     wx = view(w_, 1:nx)
@@ -202,18 +209,22 @@ function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
     wy = view(w_, nx+3:nx+2+L)
 
     # Schur-complement w.r.t inequality constraint
-    v1 = wx .+ (ρ * wt + wr) .* kkt.data.d
+    z2 .= wx .+ (ρ * wt + wr) .* kkt.data.d
 
     Δyy .= wy
-    ldiv!(z1, kkt.K, v1)
-    mul!(Δyy, kkt.data.A1, z1, 1.0, -1.0)
+    ldiv!(z1, kkt.K, z2)
+    mul!(Δyy, A1, z1, 1.0, -1.0)
 
     status = MadNLP.solve!(kkt.linear_solver, Δyy)
     wy .= Δyy
+    # (sol, stats) = Krylov.cg(kkt.AKA, Δyy; verbose=0, rtol=1e-14)
+    # println(stats.niter)
+    # wy .= sol
+
 
     # Recover Δx
-    z1 .= v1
-    mul!(z1, kkt.data.A1', wy, -1.0, 1.0)
+    z1 .= z2
+    mul!(z1, A1', wy, -1.0, 1.0)
     ldiv!(wx, kkt.K, z1)
 
     # Recover solution (Δr, Δt)
@@ -222,6 +233,7 @@ function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
     w_[nx+2] = -wr + ρ * Δr   # Δt
 
     MadNLP.finish_aug_solve!(kkt, w)
+
     return true
 end
 

@@ -6,6 +6,7 @@ using LinearAlgebra
 using Printf
 using SparseArrays
 using Statistics
+using Krylov
 
 using JuMP
 

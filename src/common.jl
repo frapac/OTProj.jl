@@ -11,9 +11,9 @@ function projection_simplex(w)
 end
 
 # C = alpha * A / B + beta * C
-function scaldiv!(C, A, B, alpha, beta, N)
+function scaldiv!(C, A, B, alpha, N)
     @turbo for i in 1:N
-        C[i] = beta * C[i] + alpha * A[i] / B[i]
+        C[i] += alpha * A[i] * B[i]
     end
 end
 
