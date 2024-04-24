@@ -7,6 +7,7 @@ using Printf
 using SparseArrays
 using Statistics
 using Krylov
+import MadNLP: dual_lb, dual_ub
 
 using JuMP
 

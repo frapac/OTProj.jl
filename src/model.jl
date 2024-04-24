@@ -47,9 +47,8 @@ function OTCompactModel(data::OTData, delta; eval_hessian=false)
 
     # Initial variable
     x0 = zeros(S * L)
-    # x0 .= 1e-4
-    for s in 1:S, l in 1:L
-        x0[s + S * (l-1)] = data.w[s] / L
+    for l in 1:L
+        x0[l + S * (l-1)] = data.q[l]
     end
     y0 = fill(0.0, L+1)
 
@@ -76,13 +75,6 @@ end
 
 function NLPModels.obj(ot::OTCompactModel, x::Vector{T}) where T
     A2 = ColumnOperator{Float64}(ot.data.L, ot.data.S)
-    # nzval = 0
-    # for i in eachindex(x)
-    #     if x[i] > 1e-5
-    #         nzval += 1
-    #     end
-    # end
-    # println(nzval)
     residual = ot.res
     residual .= ot.data.w
     mul!(residual, A2, x, 1.0, -1.0)

@@ -21,7 +21,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::RowOperator{T}, x::Abstract
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::RowOperator{T}, x::AbstractVector{T}, alpha::T, beta::T) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::RowOperator{T}, x::AbstractVector{T}, alpha::Number, beta::Number) where T
     S, L = A.S, A.L
     @inbounds for l in 1:L
         y[l] *= beta
@@ -42,7 +42,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, RowOperator{T}},
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, RowOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T <: Number
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, RowOperator{T}}, x::AbstractVector{T}, alpha::Number, beta::Number) where T <: Number
     S, L = A.parent.S, A.parent.L
     for l in 1:L
         @turbo for s in 1:S
@@ -73,7 +73,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::Abstr
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::AbstractVector{T}, alpha::T, beta::T) where T
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::ColumnOperator{T}, x::AbstractVector{T}, alpha::Number, beta::Number) where T
     S, L = A.S, A.L
     @inbounds for s in 1:S
         y[s] *= beta
@@ -94,7 +94,7 @@ function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T
     end
 end
 
-function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}, alpha::T, beta::T) where T <: Number
+function LinearAlgebra.mul!(y::AbstractVector{T}, A::Adjoint{T, ColumnOperator{T}}, x::AbstractVector{T}, alpha::Number, beta::Number) where T <: Number
     S, L = A.parent.S, A.parent.L
     for l in 1:L
         @turbo for s in 1:S
@@ -155,34 +155,46 @@ function init!(B::OTQuadraticBlock)
 end
 
 function LinearAlgebra.mul!(y, B::OTQuadraticBlock, x)
-    y .= x .* B.Σ                         # Σ x
-    mul!(B.b1, B.data.A2, x)              # A₂ x
-    mul!(y, B.data.A2', B.b1, 1.0, 1.0)   # Σx + A₂ᵀA₂ x
+    A2 = ColumnOperator{Float64}(B.data.L, B.data.S)
+    # Σ x
+    @turbo for k in eachindex(y)
+        y[k] = x[k] * B.Σ[k]
+    end
+    mul!(B.b1, A2, x)              # A₂ x
+    mul!(y, A2', B.b1, 1.0, 1.0)   # Σx + A₂ᵀA₂ x
     return y
 end
 
-
 # Implement Woodbury formula
-function LinearAlgebra.ldiv!(y, B::OTQuadraticBlock, x)
-    A2 = ColumnOperator{Float64}(B.data.L, B.data.S)
+function _solve!(B::OTQuadraticBlock, x)
     L, S = B.data.L, B.data.S
     θ = B.invΣ
 
     fill!(B.b1, 0.0)
+    # A₂ Σ⁻¹ x
     @inbounds for l in 1:L
         @turbo for s in 1:S
             B.b1[s] += θ[s + S * (l-1)] * x[s + S * (l-1)]
         end
     end
+    # V⁻¹A₂Σ⁻¹ x
     @inbounds for s in 1:S
         B.b1[s] = B.b1[s] / B.V[s]
     end
+    # Σ⁻¹ x - Σ⁻¹A₂ᵀV⁻¹A₂Σ⁻¹ x
     @inbounds for l in 1:L
         @turbo for s in 1:S
             θi = θ[s + S * (l-1)]
-            y[s + S * (l-1)] = θi * (x[s + S * (l-1)] - B.b1[s])
+            x[s + S * (l-1)] = θi * (x[s + S * (l-1)] - B.b1[s])
         end
     end
+    return x
+end
+
+function LinearAlgebra.ldiv!(y, B::OTQuadraticBlock, x)
+    L, S = B.data.L, B.data.S
+    copyto!(y, x)
+    _solve!(B, y)
     return y
 end
 
@@ -221,16 +233,38 @@ end
 function LinearAlgebra.mul!(y, K::OTCondensedBlock, x)
     mul!(y, K.B, x)                     # B x
     rdx = dot(K.data.d, x) * K.ρ[1]     # dᵀx * ρ
-    y .+= rdx .* K.data.d               # B x + ddᵀx * ρ
+    @turbo for k in eachindex(y)
+        y[k] += rdx * K.data.d[k]               # B x + ddᵀx * ρ
+    end
     return y
 end
 
 # Implement Sherman-Morisson formula
 function LinearAlgebra.ldiv!(y, K::OTCondensedBlock, x)
-    ldiv!(y, K.B, x)                       # B⁻¹ x
     r = 1.0 / K.ρ[1] + dot(K.data.d, K.a3) # ρ + d' B⁻¹ d
-    dBx = dot(K.data.d, y)                 # dᵀB⁻¹ x
-    y .-= K.a3 .* (dBx / r)                # B⁻¹ x - (B⁻¹ddᵀB⁻¹ x) / r
+    ρ = K.ρ[1]
+
+    w = K.a2
+    y .= 0
+    copyto!(w, x)
+    # Custom iterative refinement
+    for i in 1:10
+        # B⁻¹ x
+        _solve!(K.B, w)
+        # dᵀB⁻¹ x
+        dBx = dot(K.data.d, w)
+        # B⁻¹ x - (B⁻¹ddᵀB⁻¹ x) / r
+        axpy!(-dBx / r, K.a3, w)
+        axpy!(1.0, w, y)
+
+        mul!(w, K, y)
+        w .= x .- w
+
+        if norm(w) <= 1e-6
+            break
+        end
+    end
+
     return y
 end
 

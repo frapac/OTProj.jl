@@ -10,20 +10,6 @@ function projection_simplex(w)
     return max.(w .- τ, 0.0)
 end
 
-# C = alpha * A / B + beta * C
-function scaldiv!(C, A, B, alpha, N)
-    @turbo for i in 1:N
-        C[i] += alpha * A[i] * B[i]
-    end
-end
-
-function axdiv!(A, B)
-    N = length(A)
-    @turbo for i in 1:N
-        A[i] = A[i] / B[i]
-    end
-end
-
 function build_optimal_transport(data::OTData)
     S, L = data.S, data.L
 
@@ -48,5 +34,68 @@ function build_projection_wasserstein_qp(data::OTData, delta)
     @objective(model, Min, 0.5 * dot(p - data.w, p - data.w))
 
     return model
+end
+
+function theta2csr(θ, tau, L, S)
+    nnz_ = 0
+    Bp = zeros(Int, L+1)
+    @inbounds for i in 1:L, j in 1:S
+        if (θ[j + S * (i-1)] > tau)
+            nnz_ += 1
+            Bp[i] += 1
+        end
+    end
+
+    Bj = zeros(Int, nnz_)
+    Bx = zeros(Float64, nnz_)
+
+    cumsum = 1
+    @inbounds for i in 1:L
+        tmp = Bp[i]
+        Bp[i] = cumsum
+        cumsum += tmp
+    end
+    Bp[L+1] = nnz_ + 1
+
+    @inbounds for i in 1:L, j in 1:S
+        if (θ[j + S * (i-1)] > tau)
+            dest = Bp[i]
+            Bj[dest] = j
+            Bx[dest] = θ[j + S * (i-1)]
+            Bp[i] += 1
+        end
+    end
+    last = 1
+    @inbounds for i in 1:L
+        tmp = Bp[i]
+        Bp[i] = last
+        last = tmp
+    end
+    return (Bp, Bj, Bx)
+end
+
+function count_nnz(θ, tau, L, S)
+    cnt = 0
+    @inbounds for i in 1:L, j in 1:S
+        if (θ[j + S * (i-1)] > tau)
+            cnt += 1
+        end
+    end
+    return cnt
+end
+
+function MadNLP.UnreducedKKTVector(
+    values, n::Int, m::Int, nlb::Int, nub::Int, ind_lb, ind_ub
+)
+    x = MadNLP._madnlp_unsafe_wrap(values, n + m) # Primal-Dual
+    xp = MadNLP._madnlp_unsafe_wrap(values, n) # Primal
+    xl = MadNLP._madnlp_unsafe_wrap(values, m, n+1) # Dual
+    xzl = MadNLP._madnlp_unsafe_wrap(values, nlb, n + m + 1) # Lower bound
+    xzu = MadNLP._madnlp_unsafe_wrap(values, nub, n + m + nlb + 1) # Upper bound
+
+    xp_lr = view(xp, ind_lb)
+    xp_ur = view(xp, ind_ub)
+
+    return MadNLP.UnreducedKKTVector(values, x, xp, xp_lr, xp_ur, xl, xzl, xzu)
 end
 
