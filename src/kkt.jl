@@ -3,7 +3,7 @@
     OTKKTSystem
 =#
 
-struct OTKKTSystem{T, VI, VT, MT, LS} <: MadNLP.AbstractReducedKKTSystem{T, VT, MT, MadNLP.ExactHessian{T, VT}}
+struct OTKKTSystem{T, VI, VT, MT, LS, LS2} <: MadNLP.AbstractReducedKKTSystem{T, VT, MT, MadNLP.ExactHessian{T, VT}}
     aug_com::MT
     data::OTData{T}
     K::OTCondensedBlock{T}
@@ -23,6 +23,7 @@ struct OTKKTSystem{T, VI, VT, MT, LS} <: MadNLP.AbstractReducedKKTSystem{T, VT, 
     z3::VT # L
     b1::VT # S
     linear_solver::LS
+    cg_solver::LS2
     strategy::Symbol
     sparsity::Ref{T}
     threshold::T
@@ -36,7 +37,7 @@ function MadNLP.create_kkt_system(
     opt_linear_solver=MadNLP.default_options(linear_solver),
     hessian_approximation=MadNLP.ExactHessian,
     strategy=:exact,
-    threshold=0.20,
+    threshold=0.00,
 ) where {T, VI, VT, MT}
     # Load original model
     nlp = cb.nlp
@@ -55,18 +56,25 @@ function MadNLP.create_kkt_system(
     AKA = NormalBlockOperator(K)
 
     linear_solver_ = linear_solver(aug_com; opt=opt_linear_solver)
+    cg_solver = if strategy == :mixed
+        Krylov.CgSolver(L, L, VT)
+    else
+        nothing
+    end
+
 
     z1  = zeros(L*S)
     z2  = zeros(L*S)
     z3  = zeros(L)
     b1  = zeros(S)
-    return OTKKTSystem{T, VI, VT, MT, typeof(linear_solver_)}(
+    return OTKKTSystem{T, VI, VT, MT, typeof(linear_solver_), typeof(cg_solver)}(
         aug_com, nlp.data, K, AKA,
         reg, pr_diag, du_diag,
         l_diag, u_diag, l_lower, u_lower,
         ind_cons.ind_lb, ind_cons.ind_ub,
         z1, z2, z3, b1,
         linear_solver_,
+        cg_solver,
         strategy,
         Ref(0.1),
         threshold,
@@ -261,9 +269,6 @@ function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
 
     Δyy .= wy
     ldiv!(z1, kkt.K, z2)
-    z3 = copy(z2)
-    mul!(z3, kkt.K, z1)
-
     mul!(Δyy, A1, z1, 1.0, -1.0)
 
     use_exact = (kkt.strategy == :exact) || (kkt.strategy == :mixed && kkt.sparsity[] < kkt.threshold)
@@ -273,9 +278,17 @@ function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
         wy .= Δyy
         K = kkt.aug_com
     else
-        (sol, stats) = Krylov.cg(kkt.AKA, Δyy; verbose=0, rtol=1e-14)
-        println(stats.niter)
-        wy .= sol
+        @time Krylov.solve!(
+            kkt.cg_solver,
+            kkt.AKA,
+            Δyy;
+            atol=0.0,
+            rtol=1e-10,
+            verbose=0,
+        )
+        copyto!(wy, kkt.cg_solver.x)
+        cg_iter = kkt.cg_solver.stats.niter
+        println(cg_iter)
     end
 
     # Recover Δx
@@ -287,7 +300,6 @@ function MadNLP.solve!(kkt::OTKKTSystem, w::MadNLP.AbstractKKTVector)
     Δr = -wt + dot(kkt.data.d, wx)
     w_[nx+1] = Δr             # Δr
     w_[nx+2] = -wr + ρ * Δr   # Δt
-
 
     MadNLP.finish_aug_solve!(kkt, w)
 
@@ -304,7 +316,7 @@ function MadNLP.solve_refine_wrapper!(
     kkt = solver.kkt
 
     use_ir = ((kkt.strategy == :exact) || (kkt.strategy == :mixed && kkt.sparsity[] < kkt.threshold))
-    use_ir &= (solver.mu <= 1e-10 && solver.cnt.k >= 20)
+    use_ir &= false #(solver.mu <= 1e-10 && solver.cnt.k >= 20)
     solver.cnt.linear_solver_time += @elapsed begin
         if use_ir
             result =  MadNLP.solve_refine!(d, solver.iterator, p, w)
@@ -319,3 +331,26 @@ function MadNLP.solve_refine_wrapper!(
 
     return result
 end
+
+# Fast MadNLP.set_aug_diagonal!
+function MadNLP.set_aug_diagonal!(kkt::OTKKTSystem{T}, solver::MadNLP.MadNLPSolver{T}) where T
+    x = MadNLP.full(solver.x)
+    xl = MadNLP.full(solver.xl)
+    xu = MadNLP.full(solver.xu)
+    zl = MadNLP.full(solver.zl)
+    zu = MadNLP.full(solver.zu)
+
+    kkt.l_diag .= solver.xl_r .- solver.x_lr
+    kkt.u_diag .= solver.x_ur .- solver.xu_r
+    copyto!(kkt.l_lower, solver.zl_r)
+    copyto!(kkt.u_lower, solver.zu_r)
+
+    @inbounds for (k, i) in enumerate(kkt.ind_lb)
+        kkt.pr_diag[i] = - kkt.l_lower[k] / kkt.l_diag[k]
+    end
+    @inbounds for (k, i) in enumerate(kkt.ind_ub)
+        kkt.pr_diag[i] = - kkt.u_lower[k] / kkt.u_diag[k]
+    end
+    return
+end
+

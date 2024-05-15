@@ -138,12 +138,12 @@ function _inv_sigma!(dest::Vector{T}, src::Vector{T}) where T
     end
 end
 
-function _update_inner_block!(B::OTQuadraticBlock)
+function _update_inner_block!(B::OTQuadraticBlock{T}) where T
     S, L = B.data.S, B.data.L
     _inv_sigma!(B.invΣ, B.Σ)
     fill!(B.V, 1.0)
-    @inbounds for s in 1:S
-        for l in 1:L
+    for l in 1:L
+        @inbounds for s in 1:S
             B.V[s] += B.invΣ[s + S*(l-1)]
         end
     end
@@ -157,7 +157,7 @@ end
 function LinearAlgebra.mul!(y, B::OTQuadraticBlock, x)
     A2 = ColumnOperator{Float64}(B.data.L, B.data.S)
     # Σ x
-    @turbo for k in eachindex(y)
+    @inbounds for k in eachindex(y)
         y[k] = x[k] * B.Σ[k]
     end
     mul!(B.b1, A2, x)              # A₂ x
@@ -243,6 +243,7 @@ end
 function LinearAlgebra.ldiv!(y, K::OTCondensedBlock, x)
     r = 1.0 / K.ρ[1] + dot(K.data.d, K.a3) # ρ + d' B⁻¹ d
     ρ = K.ρ[1]
+    norm_x = norm(x)
 
     w = K.a2
     y .= 0
@@ -259,8 +260,11 @@ function LinearAlgebra.ldiv!(y, K::OTCondensedBlock, x)
 
         mul!(w, K, y)
         w .= x .- w
+        norm_y = norm(x)
+        norm_w = norm(w)
 
-        if norm(w) <= 1e-6
+        residual_ratio = norm_w / (min(norm_y, 1e6 * norm_x) + norm_x)
+        if residual_ratio <= 1e-10
             break
         end
     end

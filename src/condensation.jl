@@ -41,22 +41,11 @@ function assemble_kkt_exact!(C::AbstractMatrix, K::OTCondensedBlock)
 
     # Add Σ⁻¹ diagonal terms
     @inbounds for l in 1:L
-        for s in 1:S
-            C[l, l] += θ[s + S*(l-1)]
+        acc = 0.0
+        @turbo for s in 1:S
+             acc += θ[s + S*(l-1)]
         end
-    end
-
-    @inbounds for i in 1:L
-        for k in 1:S
-            buffer[k] = θ[k + S * (i-1)] / D[k]
-        end
-        for j in 1:i
-            acc = 0.0
-            @turbo for k in 1:S
-                acc += buffer[k] * θ[k + S*(j-1)]
-            end
-            C[i, j] -= acc
-        end
+        C[l, l] = acc
     end
 
     @inbounds for k in 1:L
@@ -65,6 +54,18 @@ function assemble_kkt_exact!(C::AbstractMatrix, K::OTCondensedBlock)
     @inbounds for i in 1:L, j in 1:i
         C[i, j] -= γ * buffer[i] * buffer[j]
     end
+
+    # Matrix multiplication
+    k = 0
+    @inbounds for i in 1:L
+        shift = S * (i-1)
+        for j in 1:S
+            buffer[k += 1] = θ[j + shift] / D[j]
+        end
+    end
+    U = reshape(buffer, S, L)
+    V = reshape(θ, S, L)
+    mul!(C, V', U, -1.0, 1.0)
 
     return
 end
