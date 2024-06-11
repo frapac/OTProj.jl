@@ -48,7 +48,7 @@ function OTCompactModel(data::OTData, delta; eval_hessian=false)
     # Initial variable
     x0 = zeros(S * L)
     for l in 1:L
-        x0[l + S * (l-1)] = data.q[l]
+        x0[l + l * (S-1)] = data.q[l]
     end
     y0 = fill(0.0, L+1)
 

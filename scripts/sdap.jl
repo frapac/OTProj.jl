@@ -1,23 +1,40 @@
 
+using Revise
 using NLPModels
 using MadNLP
-using Profile
 using MadQP
+using MAT
+using OTProj
 using LinearAlgebra
 using SparseArrays
 
 reduction = true
 max_iter = 100
 
-h = 0.1
+h = 1.0
 a = 1.0e1
-b = 0.1
-# a,b=1, 1
+b = 1
 
-data2 = OTProj.OTData(data.w .* a, data.q .* a, data.d ./ (a * b) )
-nlp = OTProj.OTCompactModel(data2, h * valLP / b; eval_hessian=false)
+src_dir = "/home/fpacaud/dev/ot/sdap/sdap_10648_1000"
+src_file = "1-data2FP.mat"
 
-###
+file = matopen(joinpath(src_dir, src_file))
+w = read(file, "w")[:]
+delta = read(file, "delta")
+d = read(file, "d")[:]
+S = read(file, "S") |> Int
+L = read(file, "L") |> Int
+q = ones(L) ./ L
+close(file)
+
+data = OTProj.OTData(
+    w .* a,
+    q .* a,
+    d ./ (a * b),
+)
+nlp = OTProj.OTCompactModel(data, h * delta / b; eval_hessian=false)
+
+####
 
 KKT = OTProj.OTKKTSystem{Float64, Vector{Int}, Vector{Float64}, Matrix{Float64}}
 
@@ -25,7 +42,7 @@ solver = MadNLP.MadNLPSolver(
     nlp;
     kkt_system=KKT,
     mu_min=1e-11,
-    max_iter=100,
+    max_iter=300,
     dual_initialized=true,
     nlp_scaling=false,
     richardson_tol=1e-12,
@@ -45,11 +62,8 @@ solver = MadNLP.MadNLPSolver(
 
 BLAS.set_num_threads(12)
 
-Profile.clear()
-Profile.init()
-# MadQP.initialize!(solver)
 MadQP.solve!(solver)
-
-K = solver.kkt.aug_com
-
 theta = solver.kkt.K.B.invΣ
+CC = reshape(theta, L, S)
+heatmap(CC)
+
