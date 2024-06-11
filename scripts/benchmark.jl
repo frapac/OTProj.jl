@@ -9,12 +9,12 @@ using Gurobi
 DATA = joinpath(@__DIR__, "..", "..", "data", "Data")
 RESULTS = joinpath(@__DIR__, "..", "results")
 
-include(joinpath(@__DIR__, "solver.jl"))
-
 GRB_ENV = nothing
 if isnothing(GRB_ENV)
     GRB_ENV = Gurobi.Env(output_flag=0)
 end
+
+const NTHREADS = 12
 
 function solve_ipm(data::OTProj.OTData, delta)
     max_iter = 300
@@ -26,22 +26,26 @@ function solve_ipm(data::OTProj.OTData, delta)
     nlp = OTProj.OTCompactModel(data2, delta / b; eval_hessian=false)
 
     # Build MadNLP
-    madnlp_options = Dict{Symbol, Any}()
-    madnlp_options[:linear_solver] = LapackCPUSolver
-    madnlp_options[:lapack_algorithm] = MadNLP.CHOLESKY
-    madnlp_options[:dual_initialized] = true
-    madnlp_options[:max_iter] = max_iter
-    madnlp_options[:print_level] = MadNLP.ERROR
-    madnlp_options[:tol] = 1e-8
-    madnlp_options[:mu_min] = 1e-11
-    madnlp_options[:bound_fac] = 0.2
-    madnlp_options[:bound_push] = 100.0
-
-    opt_ipm, opt_linear, logger = MadNLP.load_options(; madnlp_options...)
-
     KKT = OTProj.OTKKTSystem{Float64, Vector{Int}, Vector{Float64}, Matrix{Float64}}
-    solver = MadNLP.MadNLPSolver{Float64, KKT}(nlp, opt_ipm, opt_linear; logger=logger)
-    l_solve!(solver)
+    solver = MadNLP.MadNLPSolver(
+        nlp;
+        kkt_system=KKT,
+        mu_min=1e-11,
+        max_iter=100,
+        dual_initialized=true,
+        nlp_scaling=false,
+        richardson_tol=1e-12,
+        richardson_max_iter=5,
+        tol=1e-8,
+        linear_solver=LapackCPUSolver,
+        lapack_algorithm=MadNLP.CHOLESKY,
+        print_level=MadNLP.ERROR,
+        hessian_constant=true,
+        jacobian_constant=true,
+    )
+
+    BLAS.set_num_threads(NTHREADS)
+    MadQP.solve!(solver)
 
     sol = solver.obj_val
     p = (data.A2 * solver.x.x) ./ a
@@ -58,22 +62,23 @@ function benchmark(class, resolution; distance=2)
     cnt = 1
     for k in 1001:1010, l in (k+1):1010
         @info "Instance $k x $l"
-        data = OTProj.OTData(DATA, class, k, l, resolution; distance=distance)
+        data_ref = OTProj.OTData(DATA, class, k, l, 32; distance=distance)
 
         # OT
-        modelLP = OTProj.build_optimal_transport(data)
+        modelLP = OTProj.build_optimal_transport(data_ref)
         JuMP.set_optimizer(modelLP, optimizer)
         JuMP.set_attribute(modelLP, "Method", 1)       # dual simplex
         JuMP.set_attribute(modelLP, "Presolve", 0)     # presolve=off
         JuMP.optimize!(modelLP)
         valLP = JuMP.objective_value(modelLP)
 
+        data = OTProj.OTData(DATA, class, k, l, resolution; distance=distance)
         # Gurobi
         modelQP = OTProj.build_projection_wasserstein_qp(data, 0.5 * valLP)
         JuMP.set_optimizer(modelQP, optimizer)
-        JuMP.set_attribute(modelQP, "Threads", 1)
-        JuMP.set_attribute(modelQP, "Method", 2)
-        JuMP.set_attribute(modelQP, "Presolve", 0)
+        JuMP.set_attribute(modelQP, "Threads", NTHREADS)
+        JuMP.set_attribute(modelQP, "Method", 2)      # barrier
+        JuMP.set_attribute(modelQP, "Presolve", 0)    # presolve=off
         t_gurobi = @elapsed JuMP.optimize!(modelQP)
         solGur = JuMP.objective_value(modelQP)
         pGur = JuMP.value.(modelQP[:p])
