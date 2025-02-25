@@ -86,21 +86,16 @@ function ots(model::JuMP.Model, u, p, target)
     return (JuMP.objective_value(model), JuMP.value.(model[:x]), JuMP.dual.(model[:con2]))
 end
 
-function ots(smd::SoftMaxModel, u, p, target; toleps=1e-4)
+function ots(smd::SoftMaxModel, u, p, target; eps=1e-4, eta=1e-5, kMax=10, iMax=100)
     data = smd.data
     S, L = data.S, data.L
 
-    kMax = 50
-    iMax = 100
-    tolstep = 1e-5
-    tolopt = 1e-5
-    eps = toleps
-    epsmin = 1e-5
     tot_it = 0
 
-    f = x -> objective(x, p, eps, smd)
-    g! = (g, x) -> gradient!(g, x, p, eps, smd)
+    f = x -> objective(x, p, eta, smd)
+    g! = (g, x) -> gradient!(g, x, p, eta, smd)
 
+    g = zeros(S)
     optimizer = LBFGSB.L_BFGS_B(S, 10)
     bounds = zeros(3, S)
     lb, ub = fill(-Inf, S), fill(Inf, S)
@@ -110,18 +105,14 @@ function ots(smd::SoftMaxModel, u, p, target; toleps=1e-4)
 
     for k in 1:kMax
         smd.hash[1] = UInt64(0)
-        vals, u = optimizer(f, g!, u, bounds; m=10, maxiter=iMax, pgtol=tolopt, iprint=-1)
+        vals, u = optimizer(f, g!, u, bounds; m=10, maxiter=iMax, pgtol=eps, iprint=-1)
         it_cur = optimizer.isave[30]
 
         tot_it += it_cur
-        if eps <= toleps
-            break
-        end
+        # We exit as soon as the constraint is satisfied
         if -vals > target
             break
         end
-        eta = max(0.5, min(it_cur / iMax, 0.8))
-        eps = max(eta * eps, toleps)
     end
 
     u = u .- mean(u)
@@ -137,34 +128,44 @@ end
 
 function proj_wass_bundle(
     data::OTData, delta, optimizer;
-    tol=1e-4,
+    eps0=1e-4,
+    eta0=1e-4,
+    tol=1e-6,
     kMax=100,
+    verbose=true,
 )
     L, S = data.L, data.S
     p = projection_simplex(data.w)
 
+    eta, eps = eta0, eps0
+
     smd = SoftMaxModel(data)
-    # smd = build_optimal_transport(d, p, q)
 
     nbun = kMax
     u = zeros(S)
-    target = delta + 2*tol
+    target = delta + 2*eps
 
-    # c, _, u = optimal_transport(d, p, q)
-    c, _, u = ots(smd, u, p, target; toleps=1e-5)
+    c, _, u = ots(smd, u, p, target; eps=1e-5)
     G = zeros(1, S)
     G[1, :] .= u
 
     rhs = Float64[dot(u, p) - c]
 
+    if verbose
+        @printf(" %3s %7s %11s %5s %7s %5s \n", "it", "obj", "inf_pr", "eps", "eta", "nK")
+    end
+
     n_iter = 0
     for k in 1:kMax
         p, mu = bundle_problem(optimizer, data.w, p, delta, G, rhs)
-        # c, _, u = optimal_transport(d, p, q)
-        c, _, u = ots(smd, u, p, target; toleps=1e-5)
+        c, _, u = ots(smd, u, p, target; eps=eps, eta=eta)
 
-        if abs(c - delta) <= tol
+        gap = abs(c - delta)
+        if gap <= tol
             break
+        elseif gap <= eps
+            eps *= 0.1
+            eta *= 0.1
         end
 
         nk = length(mu)
@@ -183,7 +184,7 @@ function proj_wass_bundle(
         end
         G = [G; u']
         rhs = [rhs; dot(u, p) - c]
-        @printf("k = %3d, val = %.5e, c= %2.1e, nbun=%3d \n", k, 0.5*norm(p - data.w)^2, c - delta, nk)
+        verbose && @printf(" %3d %2.5e %2.1e %2.1e %2.1e %3d \n", k, 0.5*norm(p - data.w)^2, c - delta, eps, eta, nk)
         n_iter += 1
     end
     return p, 0.5 * norm(p - data.w)^2, n_iter
